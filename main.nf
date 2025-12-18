@@ -69,9 +69,6 @@ workflow {
     )
     compareAssemblies(flye.out.assembly.join(doradoPolish.out.polished_assembly))
 
-    flye.out.assembly | view
-    doradoPolish.out.polished_assembly | view
-
     ch_polished_assemblies = doradoPolish.out.polished_assembly
     ch_assembly_comparisons = compareAssemblies.out.report
     ch_assemblies_collect = flye.out.assembly
@@ -205,15 +202,17 @@ process fastQC {
   tuple val(meta), path(fastq)
 
   output:
-  tuple val(meta), path('*.{html,zip}'), emit: report
+  tuple val(meta), path('*_fastqc.{html,zip}'), emit: report
 
   script:
   name = "${meta.id}" + (meta.containsKey('step') ? "_${meta.step}" : '')
   """
+  cp -n ${fastq} ${name}.fastq.gz
+
   fastqc \\
     --memory ${task.memory.toMega()} \\
     --outdir . \\
-    ${fastq}
+    ${name}.fastq.gz
   """
 }
 
