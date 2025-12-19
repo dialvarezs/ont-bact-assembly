@@ -1,4 +1,4 @@
-# Bacterial Assembly Pipeline
+# ONT Bacterial Assembly
 
 Small Nextflow pipeline that performs:
 - read qc (nanoq, fastqc)
