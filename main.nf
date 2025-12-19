@@ -10,22 +10,26 @@ workflow {
       ]
     }
   ch_files_for_qc = ch_samples
-  val_checkm2_db = file(params.checkm2_db, checkIfExists: true)
-  val_contaminant_fasta = [[id: 'contaminant_db'], file(params.contaminant, checkIfExists: true)]
+  val_checkm2_db = params.checkm2_db
+    ? file(params.checkm2_db, checkIfExists: true)
+    : null
+  val_contaminant = params.contaminant
+    ? [[id: 'contaminant_db'], file(params.contaminant, checkIfExists: true)]
+    : null
 
-  nanoqFilter(ch_samples)
+  nanoqFilter(ch_samples, params.nanoq_min_length, params.nanoq_min_quality)
   ch_files_for_qc = ch_files_for_qc.mix(nanoqFilter.out.fastq)
 
   /*
     Contamination Screening
    */
 
-  if (!params.skip_decontamination) {
-    makeBlastDb(val_contaminant_fasta)
+  if (!params.skip_decontamination && val_contaminant) {
+    makeBlastDb(val_contaminant)
 
     fastqToFasta(nanoqFilter.out.fastq)
     blastn(fastqToFasta.out.fasta, makeBlastDb.out.db_dir)
-    getContaminatedIDs(blastn.out.blast_report)
+    getContaminatedIDs(blastn.out.blast_report, params.blast_min_pident, params.blast_min_qcovs)
 
     ch_samples_with_contaminated_ids = nanoqFilter.out.fastq
       .join(getContaminatedIDs.out.contaminated_ids)
@@ -42,7 +46,7 @@ workflow {
   /* 
     Downsampling
    */
-  rasusa(ch_samples_clean)
+  rasusa(ch_samples_clean, params.rasusa_coverage, params.rasusa_default_bases)
 
   /*
     Assembly and Polishing
@@ -84,21 +88,24 @@ workflow {
   /*
     QC Reports
    */
+  ch_multiqc_reports = channel.empty()
+
   nanoqReport(ch_files_for_qc)
+  ch_multiqc_reports = ch_multiqc_reports.mix(nanoqReport.out.report.map { _meta, report -> report })
+  
   fastQC(ch_files_for_qc)
+  ch_multiqc_reports = ch_multiqc_reports.mix(fastQC.out.report.map { _meta, report -> report })
 
   quast(ch_assemblies_collect)
+  ch_multiqc_reports = ch_multiqc_reports.mix(quast.out.report)
 
-  checkm2(ch_assemblies_collect, val_checkm2_db)
+  if (val_checkm2_db) {
+    checkm2(ch_assemblies_collect, val_checkm2_db)
+    ch_multiqc_reports = ch_multiqc_reports.mix(checkm2.out.report)
+  }
 
   assemblyCoverage(postAlignToAssembly.out.bam)
-
-  ch_multiqc_reports = nanoqReport.out.report
-    .mix(fastQC.out.report)
-    .mix(assemblyCoverage.out.report)
-    .map { _meta, report -> report }
-    .mix(quast.out.report)
-    .mix(checkm2.out.report)
+  ch_multiqc_reports = ch_multiqc_reports.mix(assemblyCoverage.out.report.map { _meta, report -> report })
 
   multiQC(ch_multiqc_reports.collect())
 
@@ -176,6 +183,8 @@ process nanoqFilter {
 
   input:
   tuple val(meta), path(fastq)
+  val min_length
+  val min_quality
 
   output:
   tuple val(meta), path("${meta.id}.postqc.fastq.gz"), emit: fastq
@@ -184,8 +193,8 @@ process nanoqFilter {
   meta = meta + [step: 'postqc']
   """
   nanoq \\
-    --min-len ${params.nanoq_min_length} \\
-    --min-qual ${params.nanoq_min_quality} \\
+    --min-len ${min_length} \\
+    --min-qual ${min_quality} \\
     --input ${fastq} \\
     --output ${meta.id}.postqc.fastq.gz \\
     -vv
@@ -237,15 +246,17 @@ process rasusa {
 
   input:
   tuple val(meta), path(fastq)
+  val target_coverage
+  val default_bases
 
   output:
   tuple val(meta), path("${meta.id}_subsampled.fastq.gz"), emit: fastq
 
   script:
   meta = meta + [step: 'subsampled']
-  coverage_bases = params.rasusa_coverage && meta.containsKey('genome_size')
-    ? (params.rasusa_coverage.toInteger() * meta.genome_size.toInteger()).toString()
-    : params.rasusa_default_bases
+  coverage_bases = target_coverage && meta.containsKey('genome_size')
+    ? (target_coverage.toInteger() * meta.genome_size.toInteger()).toString()
+    : default_bases
   """
   rasusa reads \\
     --output ${meta.id}_subsampled.fastq.gz \\
@@ -459,6 +470,8 @@ process getContaminatedIDs {
 
   input:
   tuple val(meta), path(blast_report)
+  val min_pident
+  val min_qcovs
 
   output:
   tuple val(meta), path("${meta.id}_contaminated_ids.txt"), emit: contaminated_ids
@@ -466,7 +479,7 @@ process getContaminatedIDs {
   script:
   """
   qsv luau filter \\
-    'tonumber(pident) >= ${params.blast_min_pident} and tonumber(qcovs) >= ${params.blast_min_qcovs}' \\
+    'tonumber(pident) >= ${min_pident} and tonumber(qcovs) >= ${min_qcovs}' \\
     ${blast_report} \\
   | qsv select qseqid \\
   | qsv behead \\
